@@ -34,6 +34,7 @@ combined_data_df = combined_data_df.loc[:, ~combined_data_df.columns.duplicated(
 combined_data_df.replace([np.inf, -np.inf], np.nan, inplace=True)
 combined_data_df.dropna(inplace=True)
 combined_data_df = combined_data_df.drop(columns=[combined_data_df.columns[1]])
+combined_data_df = combined_data_df.drop(columns=['Close', 'Adj Close'])
 combined_data_df.to_csv('combined_data.csv')
 
 
