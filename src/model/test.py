@@ -15,35 +15,56 @@ combined_data_file_path = 'C:\\Users\\feget\\SPY-daily-forecasting\\data\\combin
 combined_data_df = pd.read_csv(combined_data_file_path)
 combined_data_df = combined_data_df.iloc[:, 2:]
 
+
+
 n = len(combined_data_df)
 train_df = combined_data_df.iloc[0:int(n*0.7)]
 val_df = combined_data_df.iloc[int(n*0.7):int(n*0.9)]
 test_df = combined_data_df.iloc[int(n*0.9):]
 
+# normalization without look-ahead bias
 train_mean = train_df.mean()
 train_std = train_df.std()
+val_mean = val_df.mean()
+val_std = val_df.std()
+test_mean = test_df.mean()
+test_std = test_df.std()
+
+
 train_df = (train_df - train_mean) / train_std
-val_df = (val_df - train_mean) / train_std
-test_df = (test_df - train_mean) / train_std
+val_df = (val_df - val_mean) / val_std
+test_df = (test_df - test_mean) / test_std
 
 class WindowGenerator():
-    def __init__(self, input_width, label_width, shift,
-                 train_df=train_df, val_df=val_df, test_df=test_df,
-                 label_columns=None):
-        self.train_df = train_df
-        self.val_df = val_df
-        self.test_df = test_df
-        self.label_columns = label_columns
-        self.column_indices = {name: i for i, name in enumerate(train_df.columns)}
-        self.input_width = input_width
-        self.label_width = label_width
-        self.shift = shift
-        self.total_window_size = input_width + shift
-        self.input_slice = slice(0, input_width)
-        self.input_indices = np.arange(self.total_window_size)[self.input_slice]
-        self.label_start = self.total_window_size - self.label_width
-        self.labels_slice = slice(self.label_start, None)
-        self.label_indices = np.arange(self.total_window_size)[self.labels_slice]
+  def __init__(self, input_width, label_width, shift,
+               train_df=train_df, val_df=val_df, test_df=test_df,
+               label_columns=None):
+    # Store the raw data.
+    self.train_df = train_df
+    self.val_df = val_df
+    self.test_df = test_df
+
+    # Work out the label column indices.
+    self.label_columns = label_columns
+    if label_columns is not None:
+      self.label_columns_indices = {name: i for i, name in
+                                    enumerate(label_columns)}
+    self.column_indices = {name: i for i, name in
+                           enumerate(train_df.columns)}
+
+    # Work out the window parameters.
+    self.input_width = input_width
+    self.label_width = label_width
+    self.shift = shift
+
+    self.total_window_size = input_width + shift
+
+    self.input_slice = slice(0, input_width)
+    self.input_indices = np.arange(self.total_window_size)[self.input_slice]
+
+    self.label_start = self.total_window_size - self.label_width
+    self.labels_slice = slice(self.label_start, None)
+    self.label_indices = np.arange(self.total_window_size)[self.labels_slice]
 
     def __repr__(self):
         return '\n'.join([
@@ -51,27 +72,45 @@ class WindowGenerator():
             f'Input indices: {self.input_indices}',
             f'Label indices: {self.label_indices}',
             f'Label column name(s): {self.label_columns}'])
-
+    
     def split_window(self, features):
         inputs = features[:, self.input_slice, :]
         labels = features[:, self.labels_slice, :]
         if self.label_columns is not None:
-            labels = tf.stack([labels[:, :, self.column_indices[name]] for name in self.label_columns], axis=-1)
+            labels = tf.stack(
+                [labels[:, :, self.column_indices[name]] for name in self.label_columns],
+                axis=-1)
+
+        # Slicing doesn't preserve static shape information, so set the shapes
+        # manually. This way the `tf.data.Datasets` are easier to inspect.
         inputs.set_shape([None, self.input_width, None])
         labels.set_shape([None, self.label_width, None])
+
         return inputs, labels
+    
+    WindowGenerator.split_window = split_window
 
     def make_dataset(self, data):
         data = np.array(data, dtype=np.float32)
         ds = tf.keras.utils.timeseries_dataset_from_array(
-            data=data,
-            targets=None,
-            sequence_length=self.total_window_size,
-            sequence_stride=1,
-            shuffle=True,
-            batch_size=32)
+        data=data,
+        targets=None,
+        sequence_length=self.total_window_size,
+        sequence_stride=1,
+        shuffle=True,
+        batch_size=32,)
         ds = ds.map(self.split_window)
         return ds
+
+    WindowGenerator.make_dataset = make_dataset
+
+    # input width = how far back in time, label width = number of target data prediction, shift = how far into future to predict
+w1 = WindowGenerator(input_width=30, label_width=1, shift=30,
+                     label_columns=['SPY'])
+
+w2 = WindowGenerator(input_width=7, label_width=1, shift=1,
+                     label_columns=['SPY'])
+
 
 @property
 def train(self):
@@ -128,7 +167,6 @@ wide_window = WindowGenerator(input_width=30, label_width=30, shift=1, label_col
 def model_builder(hp):
     model = tf.keras.Sequential()
     model.add(tf.keras.layers.LSTM(units=32, return_sequences=True))
-
     hp_units = hp.Int('units', min_value=32, max_value=512, step=32)
     model.add(tf.keras.layers.LSTM(units=hp_units, return_sequences=True))
     model.add(tf.keras.layers.Dense(1))
@@ -137,16 +175,16 @@ def model_builder(hp):
 
     model.compile(loss=tf.keras.losses.MeanSquaredError(),
                   optimizer=tf.keras.optimizers.Adam(learning_rate=hp_learning_rate),
-                  metrics=[tf.keras.metrics.MeanAbsoluteError()])
+                  metrics=[tf.keras.metrics.MeanAbsolutePercentageError()])
 
     return model
 
 tuner = kt.Hyperband(model_builder,
-                     objective='val_mean_absolute_error',
+                     objective='val_mean_absolute_per_error',
                      max_epochs=20,
                      factor=3,
-                     directory='my_dir',
-                     project_name='intro_to_kt')
+                     directory='lstm_tunerr',
+                     project_name='run_2')
 
 tuner.search(wide_window.train, epochs=20, validation_data=wide_window.val, callbacks=[stop_early])
 
@@ -165,7 +203,7 @@ def compile_and_fit(model, window, learning_rate, patience=2):
 
     model.compile(loss=tf.keras.losses.MeanSquaredError(),
                   optimizer=optimizer,
-                  metrics=[tf.keras.metrics.MeanAbsoluteError()])
+                  metrics=[tf.keras.metrics.MeanAbsolutePercentageError()])
 
     history = model.fit(window.train, epochs=MAX_EPOCHS,
                         validation_data=window.val,
